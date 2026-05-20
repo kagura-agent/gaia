@@ -3,6 +3,7 @@
 """MCP Client for interacting with MCP servers."""
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -12,6 +13,70 @@ from .transports.base import MCPTransport
 from .transports.stdio import StdioTransport
 
 logger = get_logger(__name__)
+
+
+_MCP_TOKEN_RE = re.compile(r"(?:^mcp_|_mcp_|_mcp$|^mcp$)", re.IGNORECASE)
+_logged_sanitisations: set = set()
+
+
+def sanitise_server_name(raw: str) -> str:
+    """Normalise an MCP server name for use as a tool-name prefix.
+
+    The framework prepends ``mcp_`` to every MCP-derived tool. A server
+    named ``tool_mcp`` would produce ``mcp_tool_tool_<tool>`` — a
+    double-encoded prefix that empirically trains small models to
+    truncate tool names down to the repeated prefix. This helper strips
+    redundant ``mcp`` tokens and converts dashes/whitespace to
+    underscores so the framework prefix is always a clean ``mcp_<x>_``.
+
+    Idempotent. Returns ``"server"`` for inputs that fully collapse
+    (e.g. a server literally named ``"mcp"``). Logs WARNING once per
+    distinct ``raw`` when the result differs.
+
+    KNOWN LIMITATION — redundant tool-own prefix
+    --------------------------------------------
+    Sanitisation handles the *server-name* side of the doubled-prefix
+    problem. It does NOT handle the case where a vendor's tools are
+    themselves prefixed with their server name (e.g. the OEM MCP service
+    publishes ``tool_dark_mode_on``, ``tool_displaylens_on`` etc.).
+    Combined with a clean server name ``tool``, those tools become
+    ``mcp_tool_tool_dark_mode_on`` — same doubled-token pattern, same
+    failure mode. Small models like Gemma-4-E4B "correct" the perceived
+    redundancy and emit ``mcp_tool_dark_mode_on``, which doesn't match
+    the registry.
+
+    Two workarounds are available without framework changes:
+
+    1. *Rename the server* in ``mcp_servers.json`` to break the
+       redundancy. ``tool`` -> ``toolsvc`` produces
+       ``mcp_tool_tool_dark_mode_on`` — no doubled token, Gemma
+       copies it verbatim. This is the current approach for the OEM
+       integration.
+    2. *Ask the vendor* to drop the redundant prefix from their tool
+       names so ``dark_mode_on`` becomes the canonical name.
+
+    A framework-side fix (auto-strip the tool-own prefix when it
+    matches the sanitised server prefix) is deferred: it adds
+    ambiguity risk if two MCP servers share tool names, and the
+    rename workaround is one-line per integration.
+    """
+    n = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    while True:
+        new = _MCP_TOKEN_RE.sub("_", n).strip("_")
+        if new == n:
+            break
+        n = new
+    if not n:
+        n = "server"
+    if n != raw and raw not in _logged_sanitisations:
+        logger.warning(
+            "MCP server name %r normalised to %r for tool-name prefix. "
+            "Consider renaming the server in mcp_servers.json.",
+            raw,
+            n,
+        )
+        _logged_sanitisations.add(raw)
+    return n
 
 
 def _resolve_keyring_refs(env: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -122,17 +187,26 @@ class MCPTool:
     description: str
     input_schema: Dict[str, Any]
 
-    def to_gaia_format(self, server_name: str) -> Dict[str, Any]:
+    def to_gaia_format(
+        self, prefix: str, raw_server_name: str = None
+    ) -> Dict[str, Any]:
         """Convert MCP tool schema to GAIA _TOOL_REGISTRY format.
 
         Args:
-            server_name: Name of the MCP server providing this tool
+            prefix: Sanitised server-name prefix (from ``MCPClient.prefix``).
+                Used to build the registry name and description tag.
+            raw_server_name: Original server name from ``mcp_servers.json``,
+                stored in ``_mcp_server`` for routing/lookup. Defaults to
+                ``prefix`` for backwards compatibility with tests that pass
+                a single sanitised value.
 
         Returns:
             dict: GAIA tool registry entry (without function field)
         """
         properties = self.input_schema.get("properties", {})
         required_list = self.input_schema.get("required", [])
+        if raw_server_name is None:
+            raw_server_name = prefix
 
         # Convert MCP parameters to GAIA format
         gaia_params = {}
@@ -144,13 +218,15 @@ class MCPTool:
             }
 
         return {
-            "name": f"mcp_{server_name}_{self.name}",
-            "display_name": f"{self.name} ({server_name})",
-            "description": f"[MCP:{server_name}] {self.description}",
+            "name": f"mcp_{prefix}_{self.name}",
+            "display_name": f"{self.name} ({prefix})",
+            "description": f"[MCP:{prefix}] {self.description}",
             "parameters": gaia_params,
             "atomic": True,
-            # Metadata for debugging/routing
-            "_mcp_server": server_name,
+            # Metadata for debugging/routing — raw name preserves the
+            # mcp_servers.json key so routing back to a client still
+            # works after sanitisation changes the prefix.
+            "_mcp_server": raw_server_name,
         }
 
 
@@ -165,6 +241,11 @@ class MCPClient:
 
     def __init__(self, name: str, transport: MCPTransport, debug: bool = False):
         self.name = name
+        # Sanitised prefix used for tool-name namespacing. Computed once
+        # here so every consumer (registration, unregistration, prompt
+        # fragments) sees the same value. See ``sanitise_server_name``
+        # docstring for the rationale.
+        self.prefix = sanitise_server_name(name)
         self.transport = transport
         self.debug = debug
         self.server_info: Dict[str, Any] = {}

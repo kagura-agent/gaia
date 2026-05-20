@@ -13,7 +13,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
-    Spacer,
+    Sptool,
 )
 
 from gaia.eval.claude import ClaudeClient
@@ -351,7 +351,7 @@ Generate only the additional content (without repeating the existing content).""
 
             # Add title
             story.append(Paragraph(doc_title, title_style))
-            story.append(Spacer(1, 0.2 * inch))
+            story.append(Sptool(1, 0.2 * inch))
 
             # Process content - split by lines and identify sections
             lines = content.split("\n")
@@ -366,7 +366,7 @@ Generate only the additional content (without repeating the existing content).""
                         para_text = " ".join(current_paragraph)
                         story.append(Paragraph(para_text, body_style))
                         current_paragraph = []
-                    story.append(Spacer(1, 0.1 * inch))
+                    story.append(Sptool(1, 0.1 * inch))
                     continue
 
                 # Check if line is a heading (simple heuristic: short line ending with : or all caps)

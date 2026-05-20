@@ -100,6 +100,9 @@ class ChatAgentConfig:
     # Optional capability flags (disabled by default to keep document Q&A focused)
     enable_sd_tools: bool = False  # Stable Diffusion image generation
 
+    # MCP settings
+    mcp_tool_limit: int = 100  # Max MCP tools to register (prevents context bloat)
+
     # Prompt profile controls which tools and prompt sections are included.
     # Profiles keep the system prompt lean for task-specific agents:
     #   "chat"  — basic conversation only (personality, greetings, no RAG/file tools)
@@ -1526,10 +1529,9 @@ No documents are currently indexed.
 
         # MCP tools — load from ~/.gaia/mcp_servers.json if configured.
         # Must run last so MCP tools don't bloat context before we know the base count.
-        # Hard limit: skip if MCP would add >10 tools (context bloat guard).
-        from gaia.agents.base.tools import _TOOL_REGISTRY  # noqa: F811
-
-        _MCP_TOOL_LIMIT = 10
+        # Hard limit: skip if MCP would add too many tools (context bloat guard).
+        # Configurable via ChatAgentConfig.mcp_tool_limit (default 100).
+        _MCP_TOOL_LIMIT = self.config.mcp_tool_limit
         _mcp_config_path = Path.home() / ".gaia" / "mcp_servers.json"
         if _mcp_config_path.exists() and self._mcp_manager is not None:
             try:
